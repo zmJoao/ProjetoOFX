@@ -1,14 +1,13 @@
 import argparse
-import os
 import sys
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from importlib import import_module
 from pathlib import Path
-from typing import Any
 
+from dotenv import load_dotenv
 from ofxparse import OfxParser
+from psycopg2 import Error as PostgreSQLError
 
 
 @dataclass(frozen=True)
@@ -75,111 +74,38 @@ def print_statement(
             )
 
 
-def save_transactions(transactions: list[Transaction]) -> tuple[int, int]:
-    try:
-        psycopg2: Any = import_module("psycopg2")
-    except ModuleNotFoundError as error:
-        raise RuntimeError(
-            "Driver PostgreSQL ausente. Instale as dependências com "
-            "'pip install -r requirements.txt'."
-        ) from error
-
-    database_url = os.getenv("DATABASE_URL")
-    if database_url:
-        connection = psycopg2.connect(database_url)
-    else:
-        database_name = os.getenv("PGDATABASE")
-        user = os.getenv("PGUSER")
-        if not database_name or not user:
-            raise ValueError(
-                "Configure DATABASE_URL ou as variáveis PGDATABASE e PGUSER "
-                "para salvar no PostgreSQL."
-            )
-        connection = psycopg2.connect(
-            host=os.getenv("PGHOST", "localhost"),
-            port=os.getenv("PGPORT", "5432"),
-            dbname=database_name,
-            user=user,
-            password=os.getenv("PGPASSWORD", ""),
-        )
-
-    inserted = 0
-    try:
-        with connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS movimentacoes (
-                        id SERIAL PRIMARY KEY,
-                        data_movimentacao DATE NOT NULL,
-                        valor NUMERIC(15, 2) NOT NULL,
-                        descricao VARCHAR(255) NOT NULL
-                    )
-                    """
-                )
-                cursor.execute(
-                    """
-                    CREATE UNIQUE INDEX IF NOT EXISTS
-                        uq_movimentacoes_data_valor_descricao
-                    ON movimentacoes (data_movimentacao, valor, descricao)
-                    """
-                )
-                for transaction in transactions:
-                    if len(transaction.description) > 255:
-                        raise ValueError(
-                            "Descrição excede o limite de 255 caracteres "
-                            f"na movimentação de {transaction.date:%d/%m/%Y}."
-                        )
-                    cursor.execute(
-                        """
-                        INSERT INTO movimentacoes
-                            (data_movimentacao, valor, descricao)
-                        VALUES (%s, %s, %s)
-                        ON CONFLICT (data_movimentacao, valor, descricao)
-                        DO NOTHING
-                        """,
-                        (
-                            transaction.date,
-                            transaction.amount,
-                            transaction.description,
-                        ),
-                    )
-                    inserted += cursor.rowcount
-    finally:
-        connection.close()
-
-    return inserted, len(transactions) - inserted
-
-
 def main() -> int:
+    load_dotenv()
     parser = argparse.ArgumentParser(
         description="Lê um extrato OFX, calcula o resumo e, opcionalmente, "
-        "grava as movimentações no PostgreSQL."
+        "salva as movimentações no NeonDB."
     )
     parser.add_argument(
         "arquivo",
         nargs="?",
         type=Path,
         default=Path(__file__).with_name("extrato.ofx"),
-        help="caminho do arquivo OFX (padrão: extrato.ofx ao lado do script)",
+        help="arquivo OFX (padrão: extrato.ofx ao lado do script)",
     )
     parser.add_argument(
-        "--postgres",
+        "--salvar",
         action="store_true",
-        help="salva as movimentações no PostgreSQL",
+        help="grava as movimentações no banco configurado em DATABASE_URL",
     )
     args = parser.parse_args()
 
     try:
         transactions, reported_balance = read_statement(args.arquivo)
         print_statement(transactions, reported_balance)
-        if args.postgres:
-            inserted, duplicates = save_transactions(transactions)
+        if args.salvar:
+            from api_banco import salvar_movimentacoes
+
+            inseridas, duplicadas = salvar_movimentacoes(transactions)
             print(
-                f"\nPostgreSQL: {inserted} movimentação(ões) inserida(s); "
-                f"{duplicates} duplicada(s) ignorada(s)."
+                f"\nNeonDB: {inseridas} movimentação(ões) inserida(s); "
+                f"{duplicadas} duplicada(s) ignorada(s)."
             )
-    except (OSError, ValueError, RuntimeError) as error:
+    except (OSError, ValueError, RuntimeError, PostgreSQLError) as error:
         print(f"Erro: {error}", file=sys.stderr)
         return 1
 
