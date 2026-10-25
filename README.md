@@ -6,7 +6,7 @@ Em cima disso, foi feito uma simples interface usando o React, rodando pelo nave
 
 Antes de tudo, rode este comando em um terminal dentro da pasta do projeto: 
 
-npm install
+    npm install
 
 Feito isso, para iniciar o projeto:
 
